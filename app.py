@@ -2,55 +2,73 @@ import os
 import requests
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
+from openai import OpenAI
 
 app = Flask(__name__)
 sessions = {}
 
-# --- AI QUALIFICATION PROMPT ---
-AI_SYSTEM_PROMPT = """
-You are a lead qualification assistant for Elite Services. 
-Your goal is to find out:
-1. What the client needs (Project scope).
-2. Their budget (Must be over $1000).
-3. Their timeline.
-If the lead is qualified, summarize their details. If not, be polite but don't promise a call.
+# Initialize OpenAI Client
+# Set OPENAI_API_KEY in your Render environment variables
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+# ---------------- AI QUALIFICATION ENGINE ----------------
+SYSTEM_PROMPT = """
+You are 'Elite AI', a high-end sales qualifier. Your goal is to chat naturally.
+Qualify the lead by finding:
+1. Name and Industry.
+2. Specific Pain Point/Requirement.
+3. Budget (Must be > $2,000 for 'High-End' status).
+
+If the lead provides all info, end your response with the tag: [QUALIFIED]
 """
 
-def call_ai_agent(user_msg, chat_history):
-    # This is where you connect to OpenAI or Gemini
-    # For now, we simulate an AI response that decides if the lead is "QUALIFIED"
-    # Example logic: AI returns a JSON-like summary
-    return "That sounds like a great project! To give you an accurate quote, what is your rough budget for this?"
+def get_ai_response(user_input, history):
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": user_input})
+    
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=messages
+    )
+    return response.choices[0].message.content
 
-def create_odoo_lead(data, phone):
-    # Logic to push to Odoo (same as before)
-    pass
+# ---------------------------------------------------------
 
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp():
-    msg = request.form.get("Body", "").strip()
+    incoming_msg = request.form.get("Body", "").strip()
     sender = request.form.get("From")
     response = MessagingResponse()
 
     if sender not in sessions:
-        sessions[sender] = {"history": [], "qualified": False}
-        response.message("👋 Hello! I'm the Elite AI. How can I help you grow your business today?")
+        sessions[sender] = {"history": []}
+        ai_greeting = "👋 Welcome to Elite Services. I'm your AI consultant. How can we help you today?"
+        response.message(ai_greeting)
         return str(response)
 
-    # 1. AI Processes the message
-    chat_history = sessions[sender]["history"]
-    ai_reply = call_ai_agent(msg, chat_history)
+    # Get AI's take on the conversation
+    ai_reply = get_ai_response(incoming_msg, sessions[sender]["history"])
     
-    # 2. Update History
-    sessions[sender]["history"].append({"user": msg, "bot": ai_reply})
+    # Store history
+    sessions[sender]["history"].append({"role": "user", "content": incoming_msg})
+    sessions[sender]["history"].append({"role": "assistant", "content": ai_reply})
 
-    # 3. Qualification Logic
-    # If the AI detects all info is present, it marks as qualified
-    if "BUDGET:" in ai_reply and "SCOPE:" in ai_reply:
-        create_odoo_lead(ai_reply, sender)
-        response.message("✅ AI Analysis Complete: You've been qualified! An expert will call you.")
-        sessions.pop(sender)
+    # Check for Qualification Tag
+    if "[QUALIFIED]" in ai_reply:
+        # Clean the tag for the user
+        final_reply = ai_reply.replace("[QUALIFIED]", "")
+        response.message(f"{final_reply}\n\n✅ *Status: Qualified. Sending to Odoo CRM...*")
+        
+        # Here: Trigger your existing Odoo create_lead function
+        # create_odoo_lead(sessions[sender])
+        
+        sessions.pop(sender) # Reset session
     else:
         response.message(ai_reply)
 
     return str(response)
+
+@app.route("/")
+def home():
+    return {"status": "AI Qualification Bot Online"}, 200
