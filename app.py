@@ -1,21 +1,39 @@
-# ---------------- REFINED AI SYSTEM PROMPT ----------------
-SYSTEM_PROMPT = """
-You are 'Elite AI'. Be professional and high-end. 
-You must collect exactly these three things:
-1. The user's requirement/project.
-2. Their official website URL (or if they don't have one yet).
-3. Their budget.
+import os
+import requests
+from flask import Flask, request
+from twilio.twiml.messaging_response import MessagingResponse
+from openai import OpenAI
 
-Once (and ONLY once) you have all three, tell the user: 
-"Thank you for contacting us! Your request is registered and our team will call you shortly."
-Then, end your response with this exact hidden tag: [TRIGGER_ODOO]
+app = Flask(__name__)
+
+# Securely load credentials from Render Environment Variables
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+ODOO_URL = "https://edu-isha1.odoo.com/jsonrpc"
+ODOO_DB = "edu-isha1"
+ODOO_USER_ID = 2  # As confirmed from your settings URL
+ODOO_API_KEY = os.environ.get("ODOO_API_KEY")
+
+# Initialize OpenAI
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+# Session storage (In-memory)
+sessions = {}
+
+# --- AI CONFIGURATION ---
+SYSTEM_PROMPT = """
+You are the 'Elite AI Consultant'. Your tone is premium, professional, and concise.
+Your objective is to qualify a lead by collecting:
+1. The specific service or project requirement.
+2. Their official company website URL.
+3. Their estimated project budget.
+
+Once (and ONLY once) you have all three pieces of information, respond with:
+"Thank you for contacting Elite Services! Your project details are registered, and our senior consultant will call you shortly."
+Then, append the hidden tag [TRIGGER_ODOO] at the very end of your message.
 """
 
-def create_odoo_lead(name, phone, history_log):
-    # This extracts the data from the chat history
-    # For a truly 'Elite' version, you could use a second AI call to summarize the log
-    description = f"Full Chat History:\n{history_log}"
-    
+# --- ODOO INTEGRATION ---
+def push_to_odoo(name, phone, chat_history):
     payload = {
         "jsonrpc": "2.0",
         "method": "call",
@@ -23,53 +41,84 @@ def create_odoo_lead(name, phone, history_log):
             "service": "object",
             "method": "execute_kw",
             "args": [
-                os.environ.get("ODOO_DB"),
-                int(os.environ.get("ODOO_USER_ID")),
-                os.environ.get("ODOO_API_KEY"),
-                "crm.lead",
-                "create",
+                ODOO_DB, ODOO_USER_ID, ODOO_API_KEY,
+                "crm.lead", "create", 
                 [{
-                    "name": f"AI Qualified Lead: {name}",
+                    "name": f"AI Qualified: {name}",
                     "contact_name": name,
                     "phone": phone,
-                    "description": description
+                    "description": f"QUALIFIED VIA WHATSAPP AI\n\nFull Chat Log:\n{chat_history}"
                 }]
             ]
         },
         "id": 1
     }
-    requests.post(os.environ.get("ODOO_URL"), json=payload)
+    try:
+        response = requests.post(ODOO_URL, json=payload, timeout=10)
+        return response.json()
+    except Exception as e:
+        print(f"Odoo Error: {e}")
+        return None
 
+# --- AI BRAIN ---
+def get_ai_reply(user_msg, history):
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": user_msg})
+    
+    completion = client.chat.completions.create(
+        model="gpt-4o",
+        messages=messages,
+        temperature=0.7
+    )
+    return completion.choices[0].message.content
+
+# --- WHATSAPP WEBHOOK ---
 @app.route("/whatsapp", methods=["POST"])
-def whatsapp():
+def whatsapp_webhook():
     incoming_msg = request.form.get("Body", "").strip()
-    sender = request.form.get("From")
+    sender_phone = request.form.get("From")
     response = MessagingResponse()
 
-    if sender not in sessions:
-        sessions[sender] = {"history": [], "name": "WhatsApp User"}
-        response.message("👋 Welcome to Elite Services. What can we build for you?")
+    # Reset command
+    if incoming_msg.lower() in ["hi", "hello", "restart", "menu"]:
+        sessions.pop(sender_phone, None)
+
+    if sender_phone not in sessions:
+        sessions[sender_phone] = {"history": [], "name": "WhatsApp Client"}
+        greeting = "👋 Welcome to Elite Services. I'm your AI consultant. What high-end project can we help you with today?"
+        response.message(greeting)
         return str(response)
 
-    # 1. Get AI Reply
-    ai_reply = get_ai_response(incoming_msg, sessions[sender]["history"])
-    
-    # 2. Check if AI added the trigger tag
-    if "[TRIGGER_ODOO]" in ai_reply:
-        # Clean the text so the user doesn't see the code tag
-        clean_reply = ai_reply.replace("[TRIGGER_ODOO]", "").strip()
-        response.message(clean_reply)
+    # 1. Process with AI
+    ai_response = get_ai_reply(incoming_msg, sessions[sender_phone]["history"])
+
+    # 2. Check for the Odoo Trigger Tag
+    if "[TRIGGER_ODOO]" in ai_response:
+        final_msg = ai_response.replace("[TRIGGER_ODOO]", "").strip()
+        response.message(final_msg)
         
-        # 3. PUSH TO ODOO
-        chat_log = "\n".join([f"{m['role']}: {m['content']}" for m in sessions[sender]["history"]])
-        create_odoo_lead(sessions[sender]["name"], sender, chat_log)
+        # Build Chat Log
+        full_log = "\n".join([f"{m['role']}: {m['content']}" for m in sessions[sender_phone]["history"]])
+        full_log += f"\nUser: {incoming_msg}\nAI: {final_msg}"
         
-        # Clear session so they can start a new lead later
-        sessions.pop(sender)
+        # 3. Create Lead in Odoo
+        push_to_odoo(sessions[sender_phone]["name"], sender_phone, full_log)
+        
+        # Clear session after successful qualification
+        sessions.pop(sender_phone)
     else:
-        response.message(ai_reply)
-        # Save history for the next turn
-        sessions[sender]["history"].append({"role": "user", "content": incoming_msg})
-        sessions[sender]["history"].append({"role": "assistant", "content": ai_reply})
+        # Standard AI flow
+        response.message(ai_response)
+        # Update history
+        sessions[sender_phone]["history"].append({"role": "user", "content": incoming_msg})
+        sessions[sender_phone]["history"].append({"role": "assistant", "content": ai_response})
 
     return str(response)
+
+@app.route("/", methods=["GET"])
+def health_check():
+    return {"status": "Elite AI Bot is Active", "odoo_instance": ODOO_DB}, 200
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
