@@ -17,7 +17,7 @@ def create_odoo_lead(name, phone, requirement, budget):
             "method": "execute_kw",
             "args": [
                 "edu-isha1",
-                2,  # user id
+                2,
                 "385913b70e3508d9aa7bdeec0b29ed89c1b2389d",
                 "crm.lead",
                 "create",
@@ -32,47 +32,53 @@ def create_odoo_lead(name, phone, requirement, budget):
         "id": 1
     }
 
-    requests.post(url, json=payload)
+    r = requests.post(url, json=payload)
+    print("ODOO RESPONSE:", r.text)
+    return r.json()
 
 
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp():
-    msg = request.form.get("Body")
+    msg = request.form.get("Body").strip()
     sender = request.form.get("From")
 
     if sender not in sessions:
-        sessions[sender] = {"step": 1}
+        sessions[sender] = {
+            "name": None,
+            "requirement": None,
+            "budget": None
+        }
 
     session = sessions[sender]
-
     response = MessagingResponse()
 
-    # STEP FLOW
-    if session["step"] == 1:
+    # ---------------- AI LOGIC ----------------
+
+    if not session["name"]:
         session["name"] = msg
-        session["step"] = 2
-        response.message("Great 👍 What is your requirement?")
+        response.message("👍 Nice! What service are you looking for?")
+        return str(response)
 
-    elif session["step"] == 2:
+    if not session["requirement"]:
         session["requirement"] = msg
-        session["step"] = 3
-        response.message("What is your budget?")
+        response.message("💰 What is your budget?")
+        return str(response)
 
-    elif session["step"] == 3:
+    if not session["budget"]:
         session["budget"] = msg
-        session["step"] = 4
 
-        # CREATE ODOO LEAD
-        create_odoo_lead(
+        # CREATE LEAD
+        result = create_odoo_lead(
             session["name"],
             sender,
             session["requirement"],
             session["budget"]
         )
 
-        response.message("✅ Thanks! Your request is registered. Our team will contact you.")
+        response.message("✅ Thanks! Your request is registered. Our team will contact you soon.")
 
         sessions.pop(sender)
+        return str(response)
 
     return str(response)
 
