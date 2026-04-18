@@ -87,23 +87,24 @@ def whatsapp():
     msg_lower = incoming_msg.lower()
 
 # =========================
-# SMART DATA CAPTURE
+# SMART DATA CAPTURE (FIXED)
 # =========================
 
-# Website detection
-if not data["website"] and (
-    "http" in msg_lower or "www" in msg_lower or ".com" in msg_lower
-):
-    data["website"] = incoming_msg
+# Detect website
+if not data["website"]:
+    if any(domain in msg_lower for domain in [".com", ".in", ".org", "www", "http"]):
+        data["website"] = incoming_msg.strip()
 
-# Budget detection
-elif not data["budget"] and any(char.isdigit() for char in incoming_msg):
-    data["budget"] = incoming_msg
+# Detect budget
+if not data["budget"]:
+    if any(char.isdigit() for char in incoming_msg):
+        data["budget"] = incoming_msg.strip()
 
-# Requirement detection
-elif not data["requirement"] and len(incoming_msg) > 5:
-    data["requirement"] = incoming_msg
-
+# Detect requirement
+if not data["requirement"]:
+    if len(incoming_msg.strip()) > 4:
+        data["requirement"] = incoming_msg.strip()
+        
     # =========================
     # CONTROL FLOW
     # =========================
