@@ -37,13 +37,15 @@ def push_to_odoo(name, phone, data):
                     "crm.lead",
                     "create",
                     [{
-                        "name": f"WhatsApp Lead - {data['requirement']}",
+                        "name": f"WhatsApp Lead - {data.get('requirement') or 'New Inquiry'}",
                         "contact_name": name,
                         "phone": phone,
                         "description": f"""
-Requirement: {data['requirement']}
-Website: {data['website']}
-Budget: {data['budget']}
+Lead Generated via WhatsApp
+
+Requirement: {data.get('requirement')}
+Website: {data.get('website')}
+Budget: {data.get('budget')}
 """
                     }]
                 ]
@@ -51,88 +53,101 @@ Budget: {data['budget']}
         }
 
         response = requests.post(ODOO_URL, json=payload, timeout=10)
-        print("Odoo Response:", response.text)
+        result = response.json()
+
+        if "error" in result:
+            print("Odoo ERROR:", result["error"])
+        else:
+            print("Lead Created Successfully:", result)
 
     except Exception as e:
-        print("Odoo Error:", e)
+        print("Odoo Exception:", e)
 
 # =========================
 # WHATSAPP WEBHOOK
 # =========================
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp():
-    incoming_msg = request.form.get("Body", "").strip()
-    sender = request.form.get("From")
+    try:
+        incoming_msg = request.form.get("Body", "").strip()
+        sender = request.form.get("From")
 
-    response = MessagingResponse()
+        print("Incoming:", incoming_msg)
 
-    # Reset conversation
-    if incoming_msg.lower() in ["hi", "hello", "restart"]:
-        sessions.pop(sender, None)
+        response = MessagingResponse()
 
-    # Initialize session
-    if sender not in sessions:
-        sessions[sender] = {
-            "name": "WhatsApp User",
-            "data": {
-                "requirement": None,
-                "website": None,
-                "budget": None
+        # Reset conversation
+        if incoming_msg.lower() in ["hi", "hello", "restart"]:
+            sessions.pop(sender, None)
+
+        # Create session
+        if sender not in sessions:
+            sessions[sender] = {
+                "name": "WhatsApp User",
+                "data": {
+                    "requirement": None,
+                    "website": None,
+                    "budget": None
+                }
             }
-        }
-        response.message("👋 Hi! What service do you need?")
-        return str(response)
+            response.message("👋 Hi! What service do you need?")
+            return str(response)
 
-    data = sessions[sender]["data"]
-    msg_lower = incoming_msg.lower()
+        # Get session data
+        data = sessions[sender]["data"]
+        msg = incoming_msg.strip()
+        msg_lower = msg.lower()
 
-# =========================
-# SMART DATA CAPTURE (FIXED)
-# =========================
+        # =========================
+        # DATA CAPTURE (SAFE LOGIC)
+        # =========================
 
-# Detect website
-if not data["website"]:
-    if any(domain in msg_lower for domain in [".com", ".in", ".org", "www", "http"]):
-        data["website"] = incoming_msg.strip()
+        # Website detection
+        if not data.get("website") and any(x in msg_lower for x in [".com", ".in", ".org", "www", "http"]):
+            data["website"] = msg
 
-# Detect budget
-if not data["budget"]:
-    if any(char.isdigit() for char in incoming_msg):
-        data["budget"] = incoming_msg.strip()
+        # Budget detection
+        elif not data.get("budget") and any(char.isdigit() for char in msg):
+            data["budget"] = msg
 
-# Detect requirement
-if not data["requirement"]:
-    if len(incoming_msg.strip()) > 4:
-        data["requirement"] = incoming_msg.strip()
-        
-    # =========================
-    # CONTROL FLOW
-    # =========================
+        # Requirement detection
+        elif not data.get("requirement") and len(msg) > 4:
+            data["requirement"] = msg
 
-    if not data["requirement"]:
-        response.message("What service do you need?")
-        return str(response)
+        # =========================
+        # FLOW CONTROL
+        # =========================
 
-    elif not data["website"]:
-        response.message("Please share your company website.")
-        return str(response)
+        if not data.get("requirement"):
+            response.message("What service do you need?")
+            return str(response)
 
-    elif not data["budget"]:
-        response.message("What is your approximate budget?")
-        return str(response)
+        elif not data.get("website"):
+            response.message("🌐 Please share your company website.")
+            return str(response)
 
-    else:
-        # All data collected
-        response.message("✅ Thank you! Our team will contact you shortly.")
+        elif not data.get("budget"):
+            response.message("💰 What is your approximate budget?")
+            return str(response)
 
-        push_to_odoo(
-            sessions[sender]["name"],
-            sender,
-            data
-        )
+        else:
+            response.message("✅ Thank you! Our team will contact you shortly.")
 
-        sessions.pop(sender)
-        return str(response)
+            # Push to Odoo
+            push_to_odoo(
+                sessions[sender]["name"],
+                sender,
+                data
+            )
+
+            # Clear session
+            sessions.pop(sender)
+
+            return str(response)
+
+    except Exception as e:
+        print("MAIN ERROR:", e)
+        return str(MessagingResponse().message("Server error"))
 
 # =========================
 # HEALTH CHECK
