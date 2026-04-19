@@ -1,164 +1,172 @@
 import os
 import requests
+import json
 from flask import Flask, request
-from twilio.twiml.messaging_response import MessagingResponse
+from openai import OpenAI
 
 app = Flask(__name__)
 
 # =========================
-# ENV VARIABLES
+# CONFIG
 # =========================
-ODOO_API_KEY = os.environ.get("ODOO_API_KEY")
-
 ODOO_URL = "https://edu-isha1.odoo.com/jsonrpc"
 ODOO_DB = "edu-isha1"
 ODOO_USER_ID = 2
+ODOO_API_KEY = os.environ.get("ODOO_API_KEY")
+
+PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID")
+ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN")
+
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+sessions = {}
 
 # =========================
-# SESSION STORAGE
+# SEND WHATSAPP MESSAGE (META API)
 # =========================
-sessions = {}
+def send_message(to, text):
+    url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
+
+    headers = {
+        "Authorization": f"Bearer {ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "text",
+        "text": {"body": text}
+    }
+
+    requests.post(url, headers=headers, json=payload)
+
+# =========================
+# AI DATA EXTRACTION
+# =========================
+def extract_data(message):
+    prompt = f"""
+Extract:
+- name
+- email
+- requirement
+- website
+- budget
+
+Message: "{message}"
+
+Return JSON:
+{{
+"name": "",
+"email": "",
+"requirement": "",
+"website": "",
+"budget": ""
+}}
+"""
+
+    try:
+        res = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
+        )
+        return json.loads(res.choices[0].message.content)
+    except:
+        return {}
 
 # =========================
 # PUSH TO ODOO
 # =========================
-def push_to_odoo(name, phone, data):
-    try:
-        payload = {
-            "jsonrpc": "2.0",
-            "method": "call",
-            "params": {
-                "service": "object",
-                "method": "execute_kw",
-                "args": [
-                    ODOO_DB,
-                    ODOO_USER_ID,
-                    ODOO_API_KEY,
-                    "crm.lead",
-                    "create",
-                    [{
-                        "name": f"WhatsApp Lead - {data.get('requirement') or 'New Inquiry'}",
-                        "contact_name": name,
-                        "phone": phone,
-                        "description": f"""
-Lead Generated via WhatsApp
-
-Requirement: {data.get('requirement')}
-Website: {data.get('website')}
-Budget: {data.get('budget')}
-"""
-                    }]
-                ]
-            }
+def push_to_odoo(phone, data):
+    payload = {
+        "jsonrpc": "2.0",
+        "method": "call",
+        "params": {
+            "service": "object",
+            "method": "execute_kw",
+            "args": [
+                ODOO_DB,
+                ODOO_USER_ID,
+                ODOO_API_KEY,
+                "crm.lead",
+                "create",
+                [{
+                    "name": f"WhatsApp Lead - {data.get('requirement') or 'New Inquiry'}",
+                    "contact_name": data.get("name"),
+                    "email_from": data.get("email"),
+                    "phone": phone,
+                    "description": str(data)
+                }]
+            ]
         }
+    }
 
-        response = requests.post(ODOO_URL, json=payload, timeout=10)
-        result = response.json()
-
-        if "error" in result:
-            print("Odoo ERROR:", result["error"])
-        else:
-            print("Lead Created Successfully:", result)
-
-    except Exception as e:
-        print("Odoo Exception:", e)
+    res = requests.post(ODOO_URL, json=payload)
+    print("Odoo:", res.text)
 
 # =========================
-# WHATSAPP WEBHOOK
+# WEBHOOK VERIFY
 # =========================
-@app.route("/whatsapp", methods=["POST"])
-def whatsapp():
+@app.route("/webhook", methods=["GET"])
+def verify():
+    VERIFY_TOKEN = "myverify123"
+
+    if request.args.get("hub.verify_token") == VERIFY_TOKEN:
+        return request.args.get("hub.challenge")
+    return "Error"
+
+# =========================
+# MAIN WEBHOOK
+# =========================
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    data = request.get_json()
+
     try:
-        incoming_msg = request.form.get("Body", "").strip()
-        sender = request.form.get("From")
+        message = data["entry"][0]["changes"][0]["value"]["messages"][0]
+        sender = message["from"]
+        text = message["text"]["body"]
 
-        print("Incoming:", incoming_msg)
-
-        response = MessagingResponse()
-
-        # Reset conversation
-        if incoming_msg.lower() in ["hi", "hello", "restart"]:
-            sessions.pop(sender, None)
-
-        # Create session
         if sender not in sessions:
             sessions[sender] = {
-                "name": "WhatsApp User",
-                "data": {
-                    "requirement": None,
-                    "website": None,
-                    "budget": None
-                }
+                "name": None,
+                "email": None,
+                "requirement": None,
+                "website": None,
+                "budget": None
             }
-            response.message("👋 Hi! What service do you need?")
-            return str(response)
 
-        # Get session data
-        data = sessions[sender]["data"]
-        msg = incoming_msg.strip()
-        msg_lower = msg.lower()
+        lead = sessions[sender]
 
-        # =========================
-        # DATA CAPTURE (SAFE LOGIC)
-        # =========================
+        # AI extraction
+        ai_data = extract_data(text)
 
-        # Website detection
-        if not data.get("website") and any(x in msg_lower for x in [".com", ".in", ".org", "www", "http"]):
-            data["website"] = msg
+        for key in lead:
+            if not lead[key] and ai_data.get(key):
+                lead[key] = ai_data[key]
 
-        # Budget detection
-        elif not data.get("budget") and any(char.isdigit() for char in msg):
-            data["budget"] = msg
-
-        # Requirement detection
-        elif not data.get("requirement") and len(msg) > 4:
-            data["requirement"] = msg
-
-        # =========================
-        # FLOW CONTROL
-        # =========================
-
-        if not data.get("requirement"):
-            response.message("What service do you need?")
-            return str(response)
-
-        elif not data.get("website"):
-            response.message("🌐 Please share your company website.")
-            return str(response)
-
-        elif not data.get("budget"):
-            response.message("💰 What is your approximate budget?")
-            return str(response)
-
+        # FLOW
+        if not lead["requirement"]:
+            send_message(sender, "What service do you need?")
+        elif not lead["name"]:
+            send_message(sender, "May I know your name?")
+        elif not lead["email"]:
+            send_message(sender, "Please share your email")
+        elif not lead["website"]:
+            send_message(sender, "Share your website")
+        elif not lead["budget"]:
+            send_message(sender, "Your budget?")
         else:
-            response.message("✅ Thank you! Our team will contact you shortly.")
-
-            # Push to Odoo
-            push_to_odoo(
-                sessions[sender]["name"],
-                sender,
-                data
-            )
-
-            # Clear session
+            send_message(sender, "✅ Thank you! Our team will contact you.")
+            push_to_odoo(sender, lead)
             sessions.pop(sender)
 
-            return str(response)
-
     except Exception as e:
-        print("MAIN ERROR:", e)
-        return str(MessagingResponse().message("Server error"))
+        print("Error:", e)
 
-# =========================
-# HEALTH CHECK
-# =========================
-@app.route("/", methods=["GET"])
+    return "ok"
+
+@app.route("/")
 def home():
-    return "Bot is running 🚀"
-
-# =========================
-# RUN APP
-# =========================
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    return "Running"
