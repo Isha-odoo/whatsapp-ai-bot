@@ -1,4 +1,4 @@
 flask
+gunicorn
 twilio
 requests
-gunicorn
