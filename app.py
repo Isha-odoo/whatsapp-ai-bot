@@ -1,9 +1,8 @@
 import os
 import requests
-import json
+import re
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
-from openai import OpenAI
 
 app = Flask(__name__)
 
@@ -15,49 +14,42 @@ ODOO_DB = "edu-isha1"
 ODOO_USER_ID = 2
 ODOO_API_KEY = os.environ.get("ODOO_API_KEY")
 
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-
 sessions = {}
 
 # =========================
-# AI EXTRACTION
+# HELPER FUNCTIONS
 # =========================
-def extract_data(message):
-    prompt = f"""
-Extract the following fields from the message:
 
-- name
-- email
-- requirement
-- website
-- budget
+def extract_email(msg):
+    match = re.search(r'[\w\.-]+@[\w\.-]+', msg)
+    return match.group(0) if match else None
 
-Rules:
-- If not found, return null
-- Return ONLY valid JSON
-- No extra text
+def extract_website(msg):
+    if "http" in msg or "www" in msg or ".com" in msg:
+        return msg.strip()
+    return None
 
-Message: "{message}"
+def extract_budget(msg):
+    if any(x in msg.lower() for x in ["k", "₹", "rs", "rupee"]):
+        return msg.strip()
+    return None
 
-Output:
-{{
-"name": null,
-"email": null,
-"requirement": null,
-"website": null,
-"budget": null
-}}
-"""
-    try:
-        res = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0
-        )
-        return json.loads(res.choices[0].message.content)
-    except Exception as e:
-        print("AI ERROR:", e)
-        return {}
+def extract_name(msg):
+    if "i am" in msg.lower():
+        return msg.lower().split("am")[-1].split(".")[0].strip().title()
+    if msg.isalpha() and len(msg) > 2:
+        return msg.title()
+    return None
+
+def extract_requirement(msg):
+    msg_lower = msg.lower()
+    if "website" in msg_lower:
+        return "Website Development"
+    if "seo" in msg_lower:
+        return "SEO Service"
+    if "app" in msg_lower:
+        return "App Development"
+    return None
 
 # =========================
 # PUSH TO ODOO
@@ -82,30 +74,32 @@ def push_to_odoo(phone, data):
                     "contact_name": data.get("name"),
                     "email_from": data.get("email"),
                     "phone": phone,
-                    "description": str(data)
+                    "description": f"""
+Name: {data.get('name')}
+Email: {data.get('email')}
+Requirement: {data.get('requirement')}
+Website: {data.get('website')}
+Budget: {data.get('budget')}
+"""
                 }]
             ]
         }
     }
 
-    try:
-        res = requests.post(ODOO_URL, json=payload)
-        print("Odoo Response:", res.text)
-    except Exception as e:
-        print("Odoo Error:", e)
+    requests.post(ODOO_URL, json=payload)
 
 # =========================
-# WHATSAPP WEBHOOK
+# WHATSAPP BOT
 # =========================
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp():
-    incoming_msg = request.form.get("Body", "").strip()
+    msg = request.form.get("Body", "").strip()
     sender = request.form.get("From")
 
     response = MessagingResponse()
 
-    # ONLY restart if explicitly asked
-    if incoming_msg.lower() == "restart":
+    # Restart only if user says restart
+    if msg.lower() == "restart":
         sessions.pop(sender, None)
 
     # Create session
@@ -123,65 +117,66 @@ def whatsapp():
     lead = sessions[sender]
 
     # =========================
-    # AI EXTRACTION
+    # SMART DATA CAPTURE
     # =========================
-    ai_data = extract_data(incoming_msg)
+    if not lead["email"]:
+        email = extract_email(msg)
+        if email:
+            lead["email"] = email
 
-    print("AI DATA:", ai_data)
+    if not lead["website"]:
+        website = extract_website(msg)
+        if website:
+            lead["website"] = website
 
-    for key in lead:
-        value = ai_data.get(key)
-        if value and str(value).strip().lower() not in ["", "null", "none"]:
-            lead[key] = str(value).strip()
+    if not lead["budget"]:
+        budget = extract_budget(msg)
+        if budget:
+            lead["budget"] = budget
+
+    if not lead["name"]:
+        name = extract_name(msg)
+        if name:
+            lead["name"] = name
+
+    if not lead["requirement"]:
+        requirement = extract_requirement(msg)
+        if requirement:
+            lead["requirement"] = requirement
 
     print("SESSION:", lead)
 
     # =========================
-    # FULL DATA CHECK
+    # CHECK COMPLETE
     # =========================
-    if all([
-        lead.get("requirement"),
-        lead.get("name"),
-        lead.get("email"),
-        lead.get("website"),
-        lead.get("budget")
-    ]):
+    if all(lead.values()):
         response.message("✅ Thank you! Our team will contact you shortly.")
         push_to_odoo(sender, lead)
         sessions.pop(sender)
         return str(response)
 
     # =========================
-    # FLOW CONTROL
+    # ASK NEXT QUESTION
     # =========================
-    if not lead.get("requirement"):
+    if not lead["requirement"]:
         response.message("What service do you need?")
-        return str(response)
-
-    elif not lead.get("name"):
+    elif not lead["name"]:
         response.message("May I know your name?")
-        return str(response)
-
-    elif not lead.get("email"):
+    elif not lead["email"]:
         response.message("Please share your email address.")
-        return str(response)
-
-    elif not lead.get("website"):
+    elif not lead["website"]:
         response.message("🌐 Please share your company website.")
-        return str(response)
-
-    elif not lead.get("budget"):
+    elif not lead["budget"]:
         response.message("💰 What is your approximate budget?")
-        return str(response)
 
     return str(response)
 
 # =========================
-# HEALTH CHECK
+# HEALTH
 # =========================
 @app.route("/")
 def home():
-    return "Bot is running 🚀"
+    return "Bot running 🚀"
 
 # =========================
 # RUN
