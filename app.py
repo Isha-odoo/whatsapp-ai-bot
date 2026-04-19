@@ -1,4 +1,4 @@
-from flask import Flask, request, Response
+from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 
 app = Flask(__name__)
@@ -10,12 +10,10 @@ def whatsapp():
     incoming_msg = request.form.get("Body", "")
     print("Incoming:", incoming_msg)
 
-    response = MessagingResponse()
-    message = response.message()
-    message.body("Bot working ✅")
+    resp = MessagingResponse()
+    resp.message("Bot working ✅")
 
-    # 🔥 IMPORTANT: exact Twilio XML response
-    return Response(str(response), content_type="application/xml")
+    return str(resp)
 
 @app.route("/")
 def home():
