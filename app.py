@@ -18,7 +18,7 @@ sessions = {}
 # =========================
 # PUSH TO ODOO
 # =========================
-def push_to_odoo(name, phone, data):
+def push_to_odoo(phone, data):
     phone = phone.replace("whatsapp:", "")
 
     payload = {
@@ -53,13 +53,13 @@ Budget: {data.get('budget')}
     }
 
     try:
-        response = requests.post(ODOO_URL, json=payload, timeout=10)
-        print("Odoo Response:", response.text)
+        res = requests.post(ODOO_URL, json=payload, timeout=10)
+        print("Odoo Response:", res.text)
     except Exception as e:
         print("Odoo Error:", e)
 
 # =========================
-# WHATSAPP WEBHOOK
+# WHATSAPP BOT
 # =========================
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp():
@@ -70,61 +70,64 @@ def whatsapp():
 
     response = MessagingResponse()
 
-    # Reset ONLY on restart
+    # Reset only when user says restart
     if incoming_msg.lower() == "restart":
         sessions.pop(sender, None)
 
     # Initialize session
     if sender not in sessions:
         sessions[sender] = {
-            "data": {
-                "requirement": None,
-                "contact_name": None,
-                "email": None,
-                "website": None,
-                "budget": None
-            }
+            "requirement": None,
+            "contact_name": None,
+            "email": None,
+            "website": None,
+            "budget": None
         }
         response.message("👋 Hi! What service do you need?")
         return str(response)
 
-    data = sessions[sender]["data"]
+    lead = sessions[sender]
 
     # =========================
-    # STEP-BY-STEP CAPTURE
+    # IGNORE GREETINGS
+    # =========================
+    if incoming_msg.lower() in ["hi", "hello", "hey"]:
+        response.message("What service do you need?")
+        return str(response)
+
+    # =========================
+    # STEP-BY-STEP FLOW
     # =========================
 
-    if not data["requirement"]:
-        data["requirement"] = incoming_msg
+    if not lead["requirement"]:
+        lead["requirement"] = incoming_msg
         response.message("May I know your name?")
         return str(response)
 
-    elif not data["contact_name"]:
-        data["contact_name"] = incoming_msg
+    elif not lead["contact_name"]:
+        lead["contact_name"] = incoming_msg
         response.message("Please share your email address.")
         return str(response)
 
-    elif not data["email"]:
-        data["email"] = incoming_msg
+    elif not lead["email"]:
+        lead["email"] = incoming_msg
         response.message("🌐 Please share your company website.")
         return str(response)
 
-    elif not data["website"]:
-        data["website"] = incoming_msg
+    elif not lead["website"]:
+        lead["website"] = incoming_msg
         response.message("💰 What is your approximate budget?")
         return str(response)
 
-    elif not data["budget"]:
-        data["budget"] = incoming_msg
+    elif not lead["budget"]:
+        lead["budget"] = incoming_msg
 
-        # All data collected
+        # =========================
+        # CREATE LEAD
+        # =========================
         response.message("✅ Thank you! Our team will contact you shortly.")
 
-        push_to_odoo(
-            data["contact_name"],
-            sender,
-            data
-        )
+        push_to_odoo(sender, lead)
 
         sessions.pop(sender)
         return str(response)
