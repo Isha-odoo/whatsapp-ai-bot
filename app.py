@@ -1,6 +1,5 @@
 import os
 import requests
-import re
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 
@@ -17,44 +16,9 @@ ODOO_API_KEY = os.environ.get("ODOO_API_KEY")
 sessions = {}
 
 # =========================
-# HELPER FUNCTIONS
-# =========================
-
-def extract_email(msg):
-    match = re.search(r'[\w\.-]+@[\w\.-]+', msg)
-    return match.group(0) if match else None
-
-def extract_website(msg):
-    if "http" in msg or "www" in msg or ".com" in msg:
-        return msg.strip()
-    return None
-
-def extract_budget(msg):
-    if any(x in msg.lower() for x in ["k", "₹", "rs", "rupee"]):
-        return msg.strip()
-    return None
-
-def extract_name(msg):
-    if "i am" in msg.lower():
-        return msg.lower().split("am")[-1].split(".")[0].strip().title()
-    if msg.isalpha() and len(msg) > 2:
-        return msg.title()
-    return None
-
-def extract_requirement(msg):
-    msg_lower = msg.lower()
-    if "website" in msg_lower:
-        return "Website Development"
-    if "seo" in msg_lower:
-        return "SEO Service"
-    if "app" in msg_lower:
-        return "App Development"
-    return None
-
-# =========================
 # PUSH TO ODOO
 # =========================
-def push_to_odoo(phone, data):
+def push_to_odoo(name, phone, data):
     phone = phone.replace("whatsapp:", "")
 
     payload = {
@@ -71,11 +35,13 @@ def push_to_odoo(phone, data):
                 "create",
                 [{
                     "name": f"WhatsApp Lead - {data.get('requirement') or 'New Inquiry'}",
-                    "contact_name": data.get("name"),
+                    "contact_name": data.get("contact_name"),
                     "email_from": data.get("email"),
                     "phone": phone,
                     "description": f"""
-Name: {data.get('name')}
+Lead Generated via WhatsApp
+
+Name: {data.get('contact_name')}
 Email: {data.get('email')}
 Requirement: {data.get('requirement')}
 Website: {data.get('website')}
@@ -86,97 +52,91 @@ Budget: {data.get('budget')}
         }
     }
 
-    requests.post(ODOO_URL, json=payload)
+    try:
+        response = requests.post(ODOO_URL, json=payload, timeout=10)
+        print("Odoo Response:", response.text)
+    except Exception as e:
+        print("Odoo Error:", e)
 
 # =========================
-# WHATSAPP BOT
+# WHATSAPP WEBHOOK
 # =========================
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp():
-    msg = request.form.get("Body", "").strip()
+    incoming_msg = request.form.get("Body", "").strip()
     sender = request.form.get("From")
+
+    print("Incoming:", incoming_msg)
 
     response = MessagingResponse()
 
-    # Restart only if user says restart
-    if msg.lower() == "restart":
+    # Reset ONLY on restart
+    if incoming_msg.lower() == "restart":
         sessions.pop(sender, None)
 
-    # Create session
+    # Initialize session
     if sender not in sessions:
         sessions[sender] = {
-            "name": None,
-            "email": None,
-            "requirement": None,
-            "website": None,
-            "budget": None
+            "data": {
+                "requirement": None,
+                "contact_name": None,
+                "email": None,
+                "website": None,
+                "budget": None
+            }
         }
-        response.message("👋 Hi! What service are you looking for?")
+        response.message("👋 Hi! What service do you need?")
         return str(response)
 
-    lead = sessions[sender]
+    data = sessions[sender]["data"]
 
     # =========================
-    # SMART DATA CAPTURE
+    # STEP-BY-STEP CAPTURE
     # =========================
-    if not lead["email"]:
-        email = extract_email(msg)
-        if email:
-            lead["email"] = email
 
-    if not lead["website"]:
-        website = extract_website(msg)
-        if website:
-            lead["website"] = website
+    if not data["requirement"]:
+        data["requirement"] = incoming_msg
+        response.message("May I know your name?")
+        return str(response)
 
-    if not lead["budget"]:
-        budget = extract_budget(msg)
-        if budget:
-            lead["budget"] = budget
+    elif not data["contact_name"]:
+        data["contact_name"] = incoming_msg
+        response.message("Please share your email address.")
+        return str(response)
 
-    if not lead["name"]:
-        name = extract_name(msg)
-        if name:
-            lead["name"] = name
+    elif not data["email"]:
+        data["email"] = incoming_msg
+        response.message("🌐 Please share your company website.")
+        return str(response)
 
-    if not lead["requirement"]:
-        requirement = extract_requirement(msg)
-        if requirement:
-            lead["requirement"] = requirement
+    elif not data["website"]:
+        data["website"] = incoming_msg
+        response.message("💰 What is your approximate budget?")
+        return str(response)
 
-    print("SESSION:", lead)
+    elif not data["budget"]:
+        data["budget"] = incoming_msg
 
-    # =========================
-    # CHECK COMPLETE
-    # =========================
-    if all(lead.values()):
+        # All data collected
         response.message("✅ Thank you! Our team will contact you shortly.")
-        push_to_odoo(sender, lead)
+
+        push_to_odoo(
+            data["contact_name"],
+            sender,
+            data
+        )
+
         sessions.pop(sender)
         return str(response)
-
-    # =========================
-    # ASK NEXT QUESTION
-    # =========================
-    if not lead["requirement"]:
-        response.message("What service do you need?")
-    elif not lead["name"]:
-        response.message("May I know your name?")
-    elif not lead["email"]:
-        response.message("Please share your email address.")
-    elif not lead["website"]:
-        response.message("🌐 Please share your company website.")
-    elif not lead["budget"]:
-        response.message("💰 What is your approximate budget?")
 
     return str(response)
 
 # =========================
-# HEALTH
+# HEALTH CHECK
 # =========================
 @app.route("/")
 def home():
-    return "Bot running 🚀"
+    return "Bot is running 🚀"
 
 # =========================
 # RUN
