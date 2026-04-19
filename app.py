@@ -55,7 +55,7 @@ def create_odoo_lead(data):
                     "crm.lead",
                     "create",
                     [{
-                        "name": f"Website Inquiry - {data.get('name')}",
+                        "name": f"Whatsapp Inquiry - {data.get('name')}",
                         "contact_name": data.get("name"),
                         "email_from": data.get("email"),
                         "description": f"""
