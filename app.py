@@ -16,6 +16,15 @@ ODOO_API_KEY = os.environ.get("ODOO_API_KEY")
 sessions = {}
 
 # =========================
+# VALIDATION FUNCTIONS
+# =========================
+def is_valid_email(text):
+    return "@" in text and "." in text
+
+def is_valid_website(text):
+    return any(x in text.lower() for x in [".com", ".in", ".org", "www", "http"])
+
+# =========================
 # PUSH TO ODOO
 # =========================
 def push_to_odoo(phone, data):
@@ -70,7 +79,7 @@ def whatsapp():
 
     response = MessagingResponse()
 
-    # Reset only when user says restart
+    # Reset session
     if incoming_msg.lower() == "restart":
         sessions.pop(sender, None)
 
@@ -88,43 +97,51 @@ def whatsapp():
 
     lead = sessions[sender]
 
-    # =========================
-    # IGNORE GREETINGS
-    # =========================
+    # Ignore greetings
     if incoming_msg.lower() in ["hi", "hello", "hey"]:
         response.message("What service do you need?")
         return str(response)
 
     # =========================
-    # STEP-BY-STEP FLOW
+    # FLOW
     # =========================
 
+    # Requirement
     if not lead["requirement"]:
         lead["requirement"] = incoming_msg
         response.message("May I know your name?")
         return str(response)
 
+    # Name
     elif not lead["contact_name"]:
-        lead["contact_name"] = incoming_msg
+        lead["contact_name"] = incoming_msg.title()
         response.message("Please share your email address.")
         return str(response)
 
+    # Email (VALIDATION)
     elif not lead["email"]:
+        if not is_valid_email(incoming_msg):
+            response.message("❌ Please enter a valid email (example: name@gmail.com)")
+            return str(response)
+
         lead["email"] = incoming_msg
         response.message("🌐 Please share your company website.")
         return str(response)
 
+    # Website (VALIDATION)
     elif not lead["website"]:
+        if not is_valid_website(incoming_msg):
+            response.message("❌ Please enter a valid website (example: abc.com)")
+            return str(response)
+
         lead["website"] = incoming_msg
         response.message("💰 What is your approximate budget?")
         return str(response)
 
+    # Budget
     elif not lead["budget"]:
         lead["budget"] = incoming_msg
 
-        # =========================
-        # CREATE LEAD
-        # =========================
         response.message("✅ Thank you! Our team will contact you shortly.")
 
         push_to_odoo(sender, lead)
@@ -135,7 +152,7 @@ def whatsapp():
     return str(response)
 
 # =========================
-# HEALTH CHECK
+# HEALTH
 # =========================
 @app.route("/")
 def home():
