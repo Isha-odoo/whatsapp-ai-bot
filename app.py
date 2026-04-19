@@ -7,10 +7,10 @@ app = Flask(__name__)
 # =========================
 # ODOO CONFIG
 # =========================
-ODOO_URL = "https://your-odoo.com"
-ODOO_DB = "your_db"
-ODOO_USERNAME = "your@email.com"
-ODOO_PASSWORD = "your_password"
+ODOO_URL = "https://edu-isha1.odoo.com"
+ODOO_DB = "edu-isha1"
+ODOO_USERNAME = "mais@odoo.com"
+ODOO_PASSWORD = "123456"
 
 # =========================
 # SESSION STORAGE
