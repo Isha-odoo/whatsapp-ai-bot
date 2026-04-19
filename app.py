@@ -24,25 +24,30 @@ sessions = {}
 # =========================
 def extract_data(message):
     prompt = f"""
-Extract:
+Extract the following fields from the message:
+
 - name
 - email
 - requirement
 - website
 - budget
 
+Rules:
+- If not found, return null
+- Return ONLY valid JSON
+- No extra text
+
 Message: "{message}"
 
-Return ONLY JSON:
+Output:
 {{
-"name": "",
-"email": "",
-"requirement": "",
-"website": "",
-"budget": ""
+"name": null,
+"email": null,
+"requirement": null,
+"website": null,
+"budget": null
 }}
 """
-
     try:
         res = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -50,7 +55,8 @@ Return ONLY JSON:
             temperature=0
         )
         return json.loads(res.choices[0].message.content)
-    except:
+    except Exception as e:
+        print("AI ERROR:", e)
         return {}
 
 # =========================
@@ -82,8 +88,11 @@ def push_to_odoo(phone, data):
         }
     }
 
-    res = requests.post(ODOO_URL, json=payload)
-    print("Odoo Response:", res.text)
+    try:
+        res = requests.post(ODOO_URL, json=payload)
+        print("Odoo Response:", res.text)
+    except Exception as e:
+        print("Odoo Error:", e)
 
 # =========================
 # WHATSAPP WEBHOOK
@@ -95,8 +104,8 @@ def whatsapp():
 
     response = MessagingResponse()
 
-    # Reset
-    if incoming_msg.lower() in ["hi", "hello", "restart"]:
+    # ONLY restart if explicitly asked
+    if incoming_msg.lower() == "restart":
         sessions.pop(sender, None)
 
     # Create session
@@ -118,38 +127,54 @@ def whatsapp():
     # =========================
     ai_data = extract_data(incoming_msg)
 
+    print("AI DATA:", ai_data)
+
     for key in lead:
-        if not lead[key] and ai_data.get(key):
-            lead[key] = ai_data[key]
+        value = ai_data.get(key)
+        if value and str(value).strip().lower() not in ["", "null", "none"]:
+            lead[key] = str(value).strip()
+
+    print("SESSION:", lead)
 
     # =========================
-    # FLOW CONTROL
+    # FULL DATA CHECK
     # =========================
-    if not lead["requirement"]:
-        response.message("What service do you need?")
-        return str(response)
-
-    elif not lead["name"]:
-        response.message("May I know your name?")
-        return str(response)
-
-    elif not lead["email"]:
-        response.message("Please share your email address.")
-        return str(response)
-
-    elif not lead["website"]:
-        response.message("🌐 Please share your company website.")
-        return str(response)
-
-    elif not lead["budget"]:
-        response.message("💰 What is your approximate budget?")
-        return str(response)
-
-    else:
+    if all([
+        lead.get("requirement"),
+        lead.get("name"),
+        lead.get("email"),
+        lead.get("website"),
+        lead.get("budget")
+    ]):
         response.message("✅ Thank you! Our team will contact you shortly.")
         push_to_odoo(sender, lead)
         sessions.pop(sender)
         return str(response)
+
+    # =========================
+    # FLOW CONTROL
+    # =========================
+    if not lead.get("requirement"):
+        response.message("What service do you need?")
+        return str(response)
+
+    elif not lead.get("name"):
+        response.message("May I know your name?")
+        return str(response)
+
+    elif not lead.get("email"):
+        response.message("Please share your email address.")
+        return str(response)
+
+    elif not lead.get("website"):
+        response.message("🌐 Please share your company website.")
+        return str(response)
+
+    elif not lead.get("budget"):
+        response.message("💰 What is your approximate budget?")
+        return str(response)
+
+    return str(response)
 
 # =========================
 # HEALTH CHECK
