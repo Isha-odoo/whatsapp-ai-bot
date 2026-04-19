@@ -2,6 +2,7 @@ import os
 import requests
 import json
 from flask import Flask, request
+from twilio.twiml.messaging_response import MessagingResponse
 from openai import OpenAI
 
 app = Flask(__name__)
@@ -14,35 +15,12 @@ ODOO_DB = "edu-isha1"
 ODOO_USER_ID = 2
 ODOO_API_KEY = os.environ.get("ODOO_API_KEY")
 
-PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID")
-ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN")
-
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 sessions = {}
 
 # =========================
-# SEND WHATSAPP MESSAGE (META API)
-# =========================
-def send_message(to, text):
-    url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
-
-    headers = {
-        "Authorization": f"Bearer {ACCESS_TOKEN}",
-        "Content-Type": "application/json"
-    }
-
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "text",
-        "text": {"body": text}
-    }
-
-    requests.post(url, headers=headers, json=payload)
-
-# =========================
-# AI DATA EXTRACTION
+# AI EXTRACTION
 # =========================
 def extract_data(message):
     prompt = f"""
@@ -55,7 +33,7 @@ Extract:
 
 Message: "{message}"
 
-Return JSON:
+Return ONLY JSON:
 {{
 "name": "",
 "email": "",
@@ -79,6 +57,8 @@ Return JSON:
 # PUSH TO ODOO
 # =========================
 def push_to_odoo(phone, data):
+    phone = phone.replace("whatsapp:", "")
+
     payload = {
         "jsonrpc": "2.0",
         "method": "call",
@@ -103,70 +83,84 @@ def push_to_odoo(phone, data):
     }
 
     res = requests.post(ODOO_URL, json=payload)
-    print("Odoo:", res.text)
+    print("Odoo Response:", res.text)
 
 # =========================
-# WEBHOOK VERIFY
+# WHATSAPP WEBHOOK
 # =========================
-@app.route("/webhook", methods=["GET"])
-def verify():
-    VERIFY_TOKEN = "myverify123"
+@app.route("/whatsapp", methods=["POST"])
+def whatsapp():
+    incoming_msg = request.form.get("Body", "").strip()
+    sender = request.form.get("From")
 
-    if request.args.get("hub.verify_token") == VERIFY_TOKEN:
-        return request.args.get("hub.challenge")
-    return "Error"
+    response = MessagingResponse()
+
+    # Reset
+    if incoming_msg.lower() in ["hi", "hello", "restart"]:
+        sessions.pop(sender, None)
+
+    # Create session
+    if sender not in sessions:
+        sessions[sender] = {
+            "name": None,
+            "email": None,
+            "requirement": None,
+            "website": None,
+            "budget": None
+        }
+        response.message("👋 Hi! What service are you looking for?")
+        return str(response)
+
+    lead = sessions[sender]
+
+    # =========================
+    # AI EXTRACTION
+    # =========================
+    ai_data = extract_data(incoming_msg)
+
+    for key in lead:
+        if not lead[key] and ai_data.get(key):
+            lead[key] = ai_data[key]
+
+    # =========================
+    # FLOW CONTROL
+    # =========================
+    if not lead["requirement"]:
+        response.message("What service do you need?")
+        return str(response)
+
+    elif not lead["name"]:
+        response.message("May I know your name?")
+        return str(response)
+
+    elif not lead["email"]:
+        response.message("Please share your email address.")
+        return str(response)
+
+    elif not lead["website"]:
+        response.message("🌐 Please share your company website.")
+        return str(response)
+
+    elif not lead["budget"]:
+        response.message("💰 What is your approximate budget?")
+        return str(response)
+
+    else:
+        response.message("✅ Thank you! Our team will contact you shortly.")
+        push_to_odoo(sender, lead)
+        sessions.pop(sender)
+        return str(response)
 
 # =========================
-# MAIN WEBHOOK
+# HEALTH CHECK
 # =========================
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    data = request.get_json()
-
-    try:
-        message = data["entry"][0]["changes"][0]["value"]["messages"][0]
-        sender = message["from"]
-        text = message["text"]["body"]
-
-        if sender not in sessions:
-            sessions[sender] = {
-                "name": None,
-                "email": None,
-                "requirement": None,
-                "website": None,
-                "budget": None
-            }
-
-        lead = sessions[sender]
-
-        # AI extraction
-        ai_data = extract_data(text)
-
-        for key in lead:
-            if not lead[key] and ai_data.get(key):
-                lead[key] = ai_data[key]
-
-        # FLOW
-        if not lead["requirement"]:
-            send_message(sender, "What service do you need?")
-        elif not lead["name"]:
-            send_message(sender, "May I know your name?")
-        elif not lead["email"]:
-            send_message(sender, "Please share your email")
-        elif not lead["website"]:
-            send_message(sender, "Share your website")
-        elif not lead["budget"]:
-            send_message(sender, "Your budget?")
-        else:
-            send_message(sender, "✅ Thank you! Our team will contact you.")
-            push_to_odoo(sender, lead)
-            sessions.pop(sender)
-
-    except Exception as e:
-        print("Error:", e)
-
-    return "ok"
-
 @app.route("/")
 def home():
-    return "Running"
+    return "Bot is running 🚀"
+
+# =========================
+# RUN
+# =========================
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
