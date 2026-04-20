@@ -1,28 +1,30 @@
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 import requests
+import threading
 
 app = Flask(__name__)
 
 # =========================
-# ODOO CONFIG
+# 🔐 ODOO CONFIG
 # =========================
-ODOO_URL = "https://edu-isha1.odoo.com"
-ODOO_DB = "edu-isha1"
-ODOO_USERNAME = "mais@odoo.com"
-ODOO_PASSWORD = "123456"
+ODOO_URL = "https://your-odoo.com"
+ODOO_DB = "your_db"
+ODOO_USERNAME = "your@email.com"
+ODOO_PASSWORD = "your_password"
 
 # =========================
-# SESSION STORAGE
+# 🧠 SESSION STORE
 # =========================
 sessions = {}
 
 # =========================
-# CREATE ODOO LEAD
+# 🚀 SAFE ODOO CALL
 # =========================
 def create_odoo_lead(data):
     try:
-        # Authenticate
+        print("🚀 Sending to Odoo:", data)
+
         auth_payload = {
             "jsonrpc": "2.0",
             "method": "call",
@@ -34,14 +36,17 @@ def create_odoo_lead(data):
             "id": 1
         }
 
-        auth = requests.post(f"{ODOO_URL}/jsonrpc", json=auth_payload).json()
-        uid = auth.get("result")
+        auth = requests.post(
+            f"{ODOO_URL}/jsonrpc",
+            json=auth_payload,
+            timeout=5   # 🔥 prevent hanging
+        ).json()
 
+        uid = auth.get("result")
         if not uid:
-            print("❌ Odoo Auth Failed")
+            print("❌ Auth failed")
             return
 
-        # Create Lead
         lead_payload = {
             "jsonrpc": "2.0",
             "method": "call",
@@ -55,9 +60,10 @@ def create_odoo_lead(data):
                     "crm.lead",
                     "create",
                     [{
-                        "name": f"Whatsapp Inquiry - {data.get('name')}",
+                        "name": f"WhatsApp Lead - {data.get('name')}",
                         "contact_name": data.get("name"),
                         "email_from": data.get("email"),
+                        "phone": data.get("phone"),
                         "description": f"""
 Service: {data.get('service')}
 Budget: {data.get('budget')}
@@ -70,82 +76,124 @@ Website: {data.get('website_link')}
             "id": 2
         }
 
-        lead = requests.post(f"{ODOO_URL}/jsonrpc", json=lead_payload).json()
-        print("✅ Lead Created:", lead)
+        res = requests.post(
+            f"{ODOO_URL}/jsonrpc",
+            json=lead_payload,
+            timeout=5   # 🔥 prevent hanging
+        ).json()
+
+        print("✅ Lead created:", res)
 
     except Exception as e:
-        print("❌ Error creating lead:", e)
+        print("❌ Odoo error:", e)
+
 
 # =========================
-# WHATSAPP BOT FLOW
+# 📲 WHATSAPP BOT
 # =========================
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp_reply():
-    user = request.values.get("From")
-    msg = request.values.get("Body", "").strip()
+    try:
+        print("🔥 HIT /whatsapp")
 
-    print(f"{user}: {msg}")
+        user = request.values.get("From")
+        msg = request.values.get("Body", "").strip()
 
-    state = sessions.get(user, {"step": 0})
-    reply = ""
+        print(f"{user}: {msg}")
 
-    if state["step"] == 0:
-        reply = "👋 Hi! Welcome.\nWhat is your *full name*?"
-        state["step"] = 1
+        state = sessions.get(user, {"step": 0})
+        reply = ""
 
-    elif state["step"] == 1:
-        state["name"] = msg
-        reply = "📧 Please enter your email address:"
-        state["step"] = 2
+        # FLOW
+        if state["step"] == 0:
+            reply = "👋 Hi! What is your full name?"
+            state["step"] = 1
 
-    elif state["step"] == 2:
-        state["email"] = msg
-        reply = "💼 What service do you need?"
-        state["step"] = 3
+        elif state["step"] == 1:
+            state["name"] = msg
+            reply = "📧 Enter your email:"
+            state["step"] = 2
 
-    elif state["step"] == 3:
-        state["service"] = msg
-        reply = "💰 What is your budget?"
-        state["step"] = 4
+        elif state["step"] == 2:
+            state["email"] = msg
+            reply = "📞 Enter your phone number:"
+            state["step"] = 3
 
-    elif state["step"] == 4:
-        state["budget"] = msg
-        reply = "🌐 Do you have a website? (yes/no)"
-        state["step"] = 5
+        elif state["step"] == 3:
+            state["phone"] = msg
+            reply = "💼 What service do you need?"
+            state["step"] = 4
 
-    elif state["step"] == 5:
-        state["has_website"] = msg.lower()
+        elif state["step"] == 4:
+            state["service"] = msg
+            reply = "💰 What is your budget?"
+            state["step"] = 5
 
-        if msg.lower() in ["yes", "y"]:
-            reply = "🔗 Please share your website link:"
+        elif state["step"] == 5:
+            state["budget"] = msg
+            reply = "🌐 Do you have a website? (yes/no)"
             state["step"] = 6
-        else:
-            state["website_link"] = "No Website"
 
-            print("🔥 FINAL DATA:", state)
-            create_odoo_lead(state)   # ✅ CREATE LEAD
+        elif state["step"] == 6:
+            state["has_website"] = msg.lower()
 
-            reply = "✅ Thank you! Our team will contact you soon."
+            if msg.lower() in ["yes", "y"]:
+                reply = "🔗 Share your website link:"
+                state["step"] = 7
+            else:
+                state["website_link"] = "No Website"
+
+                lead_data = state.copy()
+                sessions.pop(user, None)
+
+                resp = MessagingResponse()
+                resp.message("✅ Thank you! We'll contact you soon.")
+
+                # 🚀 background thread (non-blocking)
+                threading.Thread(
+                    target=create_odoo_lead,
+                    args=(lead_data,),
+                    daemon=True
+                ).start()
+
+                return str(resp)
+
+        elif state["step"] == 7:
+            state["website_link"] = msg
+
+            lead_data = state.copy()
             sessions.pop(user, None)
 
-    elif state["step"] == 6:
-        state["website_link"] = msg
+            resp = MessagingResponse()
+            resp.message("✅ Thank you! We'll contact you soon.")
 
-        print("🔥 FINAL DATA:", state)
-        create_odoo_lead(state)   # ✅ CREATE LEAD
+            threading.Thread(
+                target=create_odoo_lead,
+                args=(lead_data,),
+                daemon=True
+            ).start()
 
-        reply = "✅ Thank you! Our team will contact you soon."
-        sessions.pop(user, None)
+            return str(resp)
 
-    sessions[user] = state
+        sessions[user] = state
 
-    resp = MessagingResponse()
-    resp.message(reply)
+        resp = MessagingResponse()
+        resp.message(reply)
 
-    return str(resp)
+        return str(resp)
+
+    except Exception as e:
+        print("❌ CRASH:", e)
+
+        # 🔥 ALWAYS RETURN RESPONSE (even on error)
+        resp = MessagingResponse()
+        resp.message("⚠️ Something went wrong. Please try again.")
+
+        return str(resp)
+
 
 # =========================
-# HEALTH CHECK
+# 🟢 HEALTH CHECK
 # =========================
 @app.route("/")
 def home():
@@ -155,5 +203,9 @@ def home():
 def ping():
     return "alive"
 
+
+# =========================
+# ▶ RUN
+# =========================
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run()
