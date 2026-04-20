@@ -93,104 +93,27 @@ Website: {data.get('website_link')}
 # =========================
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp_reply():
+    print("🔥 HIT /whatsapp")
+
+    from twilio.twiml.messaging_response import MessagingResponse
+
     try:
-        print("🔥 HIT /whatsapp")
-
-        user = request.values.get("From")
         msg = request.values.get("Body", "").strip()
-
-        print(f"{user}: {msg}")
-
-        state = sessions.get(user, {"step": 0})
-        reply = ""
-
-        # FLOW
-        if state["step"] == 0:
-            reply = "👋 Hi! What is your full name?"
-            state["step"] = 1
-
-        elif state["step"] == 1:
-            state["name"] = msg
-            reply = "📧 Enter your email:"
-            state["step"] = 2
-
-        elif state["step"] == 2:
-            state["email"] = msg
-            reply = "📞 Enter your phone number:"
-            state["step"] = 3
-
-        elif state["step"] == 3:
-            state["phone"] = msg
-            reply = "💼 What service do you need?"
-            state["step"] = 4
-
-        elif state["step"] == 4:
-            state["service"] = msg
-            reply = "💰 What is your budget?"
-            state["step"] = 5
-
-        elif state["step"] == 5:
-            state["budget"] = msg
-            reply = "🌐 Do you have a website? (yes/no)"
-            state["step"] = 6
-
-        elif state["step"] == 6:
-            state["has_website"] = msg.lower()
-
-            if msg.lower() in ["yes", "y"]:
-                reply = "🔗 Share your website link:"
-                state["step"] = 7
-            else:
-                state["website_link"] = "No Website"
-
-                lead_data = state.copy()
-                sessions.pop(user, None)
-
-                resp = MessagingResponse()
-                resp.message("✅ Thank you! We'll contact you soon.")
-
-                # 🚀 background thread (non-blocking)
-                threading.Thread(
-                    target=create_odoo_lead,
-                    args=(lead_data,),
-                    daemon=True
-                ).start()
-
-                return str(resp)
-
-        elif state["step"] == 7:
-            state["website_link"] = msg
-
-            lead_data = state.copy()
-            sessions.pop(user, None)
-
-            resp = MessagingResponse()
-            resp.message("✅ Thank you! We'll contact you soon.")
-
-            threading.Thread(
-                target=create_odoo_lead,
-                args=(lead_data,),
-                daemon=True
-            ).start()
-
-            return str(resp)
-
-        sessions[user] = state
+        print("Incoming:", msg)
 
         resp = MessagingResponse()
-        resp.message(reply)
+        resp.message("✅ Bot is working")
 
+        # 🔥 ALWAYS return immediately
         return str(resp)
 
     except Exception as e:
-        print("❌ CRASH:", e)
+        print("❌ ERROR:", e)
 
-        # 🔥 ALWAYS RETURN RESPONSE (even on error)
         resp = MessagingResponse()
-        resp.message("⚠️ Something went wrong. Please try again.")
+        resp.message("⚠️ Error occurred")
 
         return str(resp)
-
 
 # =========================
 # 🟢 HEALTH CHECK
