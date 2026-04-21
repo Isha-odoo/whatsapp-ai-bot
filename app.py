@@ -1,16 +1,20 @@
 from flask import Flask, request
-from twilio.twiml.messaging_response import MessagingResponse
 import requests
+import os
 
 app = Flask(__name__)
 
 # =========================
-# ODOO CONFIG
+# CONFIG (FROM RENDER ENV)
 # =========================
-ODOO_URL = "https://edu-isha1.odoo.com"
-ODOO_DB = "edu-isha1"
-ODOO_USERNAME = "mais@odoo.com"
-ODOO_PASSWORD = "123456"
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "abc123")
+WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
+PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
+
+ODOO_URL = os.getenv("ODOO_URL")
+ODOO_DB = os.getenv("ODOO_DB")
+ODOO_USERNAME = os.getenv("ODOO_USERNAME")
+ODOO_PASSWORD = os.getenv("ODOO_PASSWORD")
 
 # =========================
 # SESSION STORAGE
@@ -18,11 +22,71 @@ ODOO_PASSWORD = "123456"
 sessions = {}
 
 # =========================
+# WEBHOOK VERIFY (META)
+# =========================
+@app.route("/webhook", methods=["GET"])
+def verify():
+    token = request.args.get("hub.verify_token")
+    challenge = request.args.get("hub.challenge")
+
+    if token == VERIFY_TOKEN:
+        return challenge, 200
+
+    return "Invalid token", 403
+
+# =========================
+# RECEIVE MESSAGE (META)
+# =========================
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    data = request.get_json()
+
+    try:
+        entry = data["entry"][0]
+        changes = entry["changes"][0]
+        value = changes["value"]
+
+        if "messages" in value:
+            msg = value["messages"][0]
+            phone = msg["from"]
+            text = msg["text"]["body"]
+
+            print(f"{phone}: {text}")
+
+            handle_message(phone, text)
+
+    except Exception as e:
+        print("Error:", e)
+
+    return "ok"
+
+# =========================
+# SEND MESSAGE (META API)
+# =========================
+def send_message(to, text):
+    url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
+
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "text",
+        "text": {"body": text}
+    }
+
+    res = requests.post(url, headers=headers, json=payload)
+    print("Send:", res.text)
+
+# =========================
 # CREATE ODOO LEAD
 # =========================
 def create_odoo_lead(data):
     try:
-        # Authenticate
+        # LOGIN
         auth_payload = {
             "jsonrpc": "2.0",
             "method": "call",
@@ -38,10 +102,10 @@ def create_odoo_lead(data):
         uid = auth.get("result")
 
         if not uid:
-            print("❌ Odoo Auth Failed")
+            print("Odoo Auth Failed")
             return
 
-        # Create Lead
+        # CREATE LEAD
         lead_payload = {
             "jsonrpc": "2.0",
             "method": "call",
@@ -55,13 +119,13 @@ def create_odoo_lead(data):
                     "crm.lead",
                     "create",
                     [{
-                        "name": f"Website Inquiry - {data.get('name')}",
+                        "name": f"WhatsApp Inquiry - {data.get('name')}",
                         "contact_name": data.get("name"),
                         "email_from": data.get("email"),
+                        "phone": data.get("phone"),
                         "description": f"""
 Service: {data.get('service')}
 Budget: {data.get('budget')}
-Has Website: {data.get('has_website')}
 Website: {data.get('website_link')}
                         """
                     }]
@@ -70,32 +134,26 @@ Website: {data.get('website_link')}
             "id": 2
         }
 
-        lead = requests.post(f"{ODOO_URL}/jsonrpc", json=lead_payload).json()
-        print("✅ Lead Created:", lead)
+        res = requests.post(f"{ODOO_URL}/jsonrpc", json=lead_payload).json()
+        print("Lead Created:", res)
 
     except Exception as e:
-        print("❌ Error creating lead:", e)
+        print("Odoo Error:", e)
 
 # =========================
-# WHATSAPP BOT FLOW
+# BOT FLOW
 # =========================
-@app.route("/whatsapp", methods=["POST"])
-def whatsapp_reply():
-    user = request.values.get("From")
-    msg = request.values.get("Body", "").strip()
-
-    print(f"{user}: {msg}")
-
-    state = sessions.get(user, {"step": 0})
+def handle_message(user, msg):
+    state = sessions.get(user, {"step": 0, "phone": user})
     reply = ""
 
     if state["step"] == 0:
-        reply = "👋 Hi! Welcome.\nWhat is your *full name*?"
+        reply = "👋 Hi! What is your full name?"
         state["step"] = 1
 
     elif state["step"] == 1:
         state["name"] = msg
-        reply = "📧 Please enter your email address:"
+        reply = "📧 Enter your email:"
         state["step"] = 2
 
     elif state["step"] == 2:
@@ -114,46 +172,27 @@ def whatsapp_reply():
         state["step"] = 5
 
     elif state["step"] == 5:
-        state["has_website"] = msg.lower()
-
         if msg.lower() in ["yes", "y"]:
-            reply = "🔗 Please share your website link:"
+            reply = "🔗 Send website link:"
             state["step"] = 6
         else:
             state["website_link"] = "No Website"
-
-            print("🔥 FINAL DATA:", state)
-            create_odoo_lead(state)   # ✅ CREATE LEAD
-
-            reply = "✅ Thank you! Our team will contact you soon."
+            create_odoo_lead(state)
+            reply = "✅ Thank you! Our team will contact you."
             sessions.pop(user, None)
 
     elif state["step"] == 6:
         state["website_link"] = msg
-
-        print("🔥 FINAL DATA:", state)
-        create_odoo_lead(state)   # ✅ CREATE LEAD
-
-        reply = "✅ Thank you! Our team will contact you soon."
+        create_odoo_lead(state)
+        reply = "✅ Thank you! Our team will contact you."
         sessions.pop(user, None)
 
     sessions[user] = state
-
-    resp = MessagingResponse()
-    resp.message(reply)
-
-    return str(resp)
+    send_message(user, reply)
 
 # =========================
 # HEALTH CHECK
 # =========================
-@app.route("/")
-def home():
-    return "Bot Running ✅"
-
 @app.route("/ping")
 def ping():
     return "alive"
-
-if __name__ == "__main__":
-    app.run(debug=True)
