@@ -40,8 +40,12 @@ sessions = {}
 # GET CLIENT FROM DB
 # =========================
 def get_client(phone_number_id):
-    if not supabase:
-        return None
+    res = supabase.table("clients") \
+        .select("*") \
+        .eq("phone_number_id", str(phone_number_id)) \
+        .execute()
+
+    return res.data[0] if res.data else None
 
     try:
         res = supabase.table("clients").select("*").eq("phone_number_id", phone_number_id).execute()
