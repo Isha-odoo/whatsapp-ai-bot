@@ -157,7 +157,7 @@ def webhook():
         value = data.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {})
 
         if "messages" not in value:
-            return "OK", 200
+            return "OK! Messae not found!", 200
 
         phone_number_id = value["metadata"]["phone_number_id"]
         user = value["messages"][0]["from"]
@@ -172,7 +172,7 @@ def webhook():
         
         if not client:
             print("❌ Client not found in Supabase for phone_number_id:", phone_number_id)
-            return "OK", 200
+            return "OK! Client not found", 200
 
         state = sessions.get(user, {"step": 0})
 
@@ -229,7 +229,7 @@ def webhook():
     except Exception as e:
         print("❌ Webhook Error:", e)
 
-    return "OK", 200
+    return "OK! Request Processed", 200
 
 
 # =========================
