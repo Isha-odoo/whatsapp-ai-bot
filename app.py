@@ -37,18 +37,12 @@ else:
 sessions = {}
 
 # =========================
-# GET CLIENT FROM DB
+# GET CLIENT FROM DB (FIXED)
 # =========================
 def get_client(phone_number_id):
-    res = supabase.table("clients") \
-        .select("*") \
-        .eq("phone_number_id", str(phone_number_id)) \
-        .execute()
-
-    return res.data[0] if res.data else None
-
+    # Removed the broken return statement and put everything safely inside the try block
     try:
-        res = supabase.table("clients").select("*").eq("phone_number_id", phone_number_id).execute()
+        res = supabase.table("clients").select("*").eq("phone_number_id", str(phone_number_id)).execute()
         return res.data[0] if res.data else None
     except Exception as e:
         print("❌ Supabase query error:", e)
@@ -173,9 +167,11 @@ def webhook():
 
         print("📩 USER:", user, "MSG:", msg)
 
-        client = get_client(user)
+        # FIXED: We now search the database using the business phone_number_id, not the customer's phone number!
+        client = get_client(phone_number_id) 
+        
         if not client:
-            print("❌ Client not found")
+            print("❌ Client not found in Supabase for phone_number_id:", phone_number_id)
             return "OK", 200
 
         state = sessions.get(user, {"step": 0})
@@ -237,8 +233,12 @@ def webhook():
 
 
 # =========================
-# HEALTH CHECK
+# HEALTH CHECK (FIXED FOR RENDER)
 # =========================
+@app.route("/")
+def home():
+    return "WhatsApp Bot is awake and healthy! ✅"
+
 @app.route("/ping")
 def ping():
     return "alive"
