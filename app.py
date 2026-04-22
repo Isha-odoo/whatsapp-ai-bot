@@ -173,7 +173,7 @@ def webhook():
 
         print("📩 USER:", user, "MSG:", msg)
 
-        client = get_client(phone_number_id)
+        client = get_client(user)
         if not client:
             print("❌ Client not found")
             return "OK", 200
