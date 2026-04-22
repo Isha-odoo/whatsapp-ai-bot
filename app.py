@@ -1,20 +1,24 @@
 from flask import Flask, request
 import requests
 import os
+from supabase import create_client
 
 app = Flask(__name__)
 
 # =========================
-# CONFIG (FROM RENDER ENV)
+# META CONFIG
 # =========================
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "abc123")
-WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
-PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
+VERIFY_TOKEN = "abc123"
+WHATSAPP_TOKEN = "YOUR_META_ACCESS_TOKEN"
+PHONE_NUMBER_ID = "YOUR_PHONE_NUMBER_ID"
 
-ODOO_URL = os.getenv("ODOO_URL")
-ODOO_DB = os.getenv("ODOO_DB")
-ODOO_USERNAME = os.getenv("ODOO_USERNAME")
-ODOO_PASSWORD = os.getenv("ODOO_PASSWORD")
+# =========================
+# SUPABASE CONFIG
+# =========================
+SUPABASE_URL = "YOUR_SUPABASE_URL"
+SUPABASE_KEY = "YOUR_SUPABASE_KEY"
+
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # =========================
 # SESSION STORAGE
@@ -22,48 +26,16 @@ ODOO_PASSWORD = os.getenv("ODOO_PASSWORD")
 sessions = {}
 
 # =========================
-# WEBHOOK VERIFY (META)
+# GET CLIENT FROM DB
 # =========================
-@app.route("/webhook", methods=["GET"])
-def verify():
-    token = request.args.get("hub.verify_token")
-    challenge = request.args.get("hub.challenge")
-
-    if token == VERIFY_TOKEN:
-        return challenge, 200
-
-    return "Invalid token", 403
+def get_client(phone_number_id):
+    res = supabase.table("clients").select("*").eq("phone_number_id", phone_number_id).execute()
+    return res.data[0] if res.data else None
 
 # =========================
-# RECEIVE MESSAGE (META)
+# SEND WHATSAPP MESSAGE
 # =========================
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    data = request.get_json()
-
-    try:
-        entry = data["entry"][0]
-        changes = entry["changes"][0]
-        value = changes["value"]
-
-        if "messages" in value:
-            msg = value["messages"][0]
-            phone = msg["from"]
-            text = msg["text"]["body"]
-
-            print(f"{phone}: {text}")
-
-            handle_message(phone, text)
-
-    except Exception as e:
-        print("Error:", e)
-
-    return "ok"
-
-# =========================
-# SEND MESSAGE (META API)
-# =========================
-def send_message(to, text):
+def send_message(to, message):
     url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
 
     headers = {
@@ -71,38 +43,38 @@ def send_message(to, text):
         "Content-Type": "application/json"
     }
 
-    payload = {
+    data = {
         "messaging_product": "whatsapp",
         "to": to,
         "type": "text",
-        "text": {"body": text}
+        "text": {"body": message}
     }
 
-    res = requests.post(url, headers=headers, json=payload)
+    res = requests.post(url, headers=headers, json=data)
     print("Send:", res.text)
 
 # =========================
 # CREATE ODOO LEAD
 # =========================
-def create_odoo_lead(data):
+def create_odoo_lead(client, data):
     try:
-        # LOGIN
+        # AUTH
         auth_payload = {
             "jsonrpc": "2.0",
             "method": "call",
             "params": {
                 "service": "common",
                 "method": "login",
-                "args": [ODOO_DB, ODOO_USERNAME, ODOO_PASSWORD]
+                "args": [client["db"], client["username"], client["api_key"]]
             },
             "id": 1
         }
 
-        auth = requests.post(f"{ODOO_URL}/jsonrpc", json=auth_payload).json()
+        auth = requests.post(f"{client['odoo_url']}/jsonrpc", json=auth_payload).json()
         uid = auth.get("result")
 
         if not uid:
-            print("Odoo Auth Failed")
+            print("❌ Odoo Auth Failed")
             return
 
         # CREATE LEAD
@@ -113,20 +85,20 @@ def create_odoo_lead(data):
                 "service": "object",
                 "method": "execute_kw",
                 "args": [
-                    ODOO_DB,
+                    client["db"],
                     uid,
-                    ODOO_PASSWORD,
+                    client["api_key"],
                     "crm.lead",
                     "create",
                     [{
-                        "name": f"WhatsApp Inquiry - {data.get('name')}",
+                        "name": f"WhatsApp Lead - {data.get('name')}",
                         "contact_name": data.get("name"),
-                        "email_from": data.get("email"),
                         "phone": data.get("phone"),
+                        "email_from": data.get("email"),
                         "description": f"""
 Service: {data.get('service')}
 Budget: {data.get('budget')}
-Website: {data.get('website_link')}
+Website: {data.get('website')}
                         """
                     }]
                 ]
@@ -134,65 +106,117 @@ Website: {data.get('website_link')}
             "id": 2
         }
 
-        res = requests.post(f"{ODOO_URL}/jsonrpc", json=lead_payload).json()
-        print("Lead Created:", res)
+        res = requests.post(f"{client['odoo_url']}/jsonrpc", json=lead_payload)
+        print("✅ Lead Created:", res.text)
 
     except Exception as e:
-        print("Odoo Error:", e)
+        print("❌ Odoo Error:", e)
 
 # =========================
-# BOT FLOW
+# WEBHOOK VERIFY (GET)
 # =========================
-def handle_message(user, msg):
-    state = sessions.get(user, {"step": 0, "phone": user})
-    reply = ""
+@app.route("/webhook", methods=["GET"])
+def verify():
+    token = request.args.get("hub.verify_token")
+    challenge = request.args.get("hub.challenge")
 
-    if state["step"] == 0:
-        reply = "👋 Hi! What is your full name?"
-        state["step"] = 1
-
-    elif state["step"] == 1:
-        state["name"] = msg
-        reply = "📧 Enter your email:"
-        state["step"] = 2
-
-    elif state["step"] == 2:
-        state["email"] = msg
-        reply = "💼 What service do you need?"
-        state["step"] = 3
-
-    elif state["step"] == 3:
-        state["service"] = msg
-        reply = "💰 What is your budget?"
-        state["step"] = 4
-
-    elif state["step"] == 4:
-        state["budget"] = msg
-        reply = "🌐 Do you have a website? (yes/no)"
-        state["step"] = 5
-
-    elif state["step"] == 5:
-        if msg.lower() in ["yes", "y"]:
-            reply = "🔗 Send website link:"
-            state["step"] = 6
-        else:
-            state["website_link"] = "No Website"
-            create_odoo_lead(state)
-            reply = "✅ Thank you! Our team will contact you."
-            sessions.pop(user, None)
-
-    elif state["step"] == 6:
-        state["website_link"] = msg
-        create_odoo_lead(state)
-        reply = "✅ Thank you! Our team will contact you."
-        sessions.pop(user, None)
-
-    sessions[user] = state
-    send_message(user, reply)
+    if token == VERIFY_TOKEN:
+        return challenge
+    return "Invalid token", 403
 
 # =========================
-# HEALTH CHECK
+# WEBHOOK RECEIVE (POST)
+# =========================
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    data = request.get_json()
+
+    try:
+        value = data["entry"][0]["changes"][0]["value"]
+
+        if "messages" not in value:
+            return "OK", 200
+
+        # 🔥 MULTI CLIENT IDENTIFIER
+        phone_number_id = value["metadata"]["phone_number_id"]
+
+        # 👤 USER
+        user = value["messages"][0]["from"]
+        msg = value["messages"][0]["text"]["body"]
+
+        print("CLIENT:", phone_number_id)
+        print("USER:", user, "MSG:", msg)
+
+        # 🔥 GET CLIENT DATA
+        client = get_client(phone_number_id)
+
+        if not client:
+            print("❌ Client not found")
+            return "OK", 200
+
+        state = sessions.get(user, {"step": 0})
+
+        # ================= BOT FLOW =================
+
+        if state["step"] == 0:
+            reply = "👋 Hi! What is your name?"
+            state["step"] = 1
+
+        elif state["step"] == 1:
+            state["name"] = msg
+            reply = "📧 Enter email:"
+            state["step"] = 2
+
+        elif state["step"] == 2:
+            state["email"] = msg
+            reply = "💼 What service do you need?"
+            state["step"] = 3
+
+        elif state["step"] == 3:
+            state["service"] = msg
+            reply = "💰 Budget?"
+            state["step"] = 4
+
+        elif state["step"] == 4:
+            state["budget"] = msg
+            reply = "🌐 Website? (yes/no)"
+            state["step"] = 5
+
+        elif state["step"] == 5:
+            if msg.lower() == "yes":
+                reply = "Send website link:"
+                state["step"] = 6
+            else:
+                state["website"] = "No"
+                state["phone"] = user
+
+                create_odoo_lead(client, state)
+                reply = "✅ Thank you! We’ll contact you."
+                sessions.pop(user)
+
+        elif state["step"] == 6:
+            state["website"] = msg
+            state["phone"] = user
+
+            create_odoo_lead(client, state)
+            reply = "✅ Thank you! We’ll contact you."
+            sessions.pop(user)
+
+        sessions[user] = state
+
+        send_message(user, reply)
+
+    except Exception as e:
+        print("❌ Webhook Error:", e)
+
+    return "OK", 200
+
+# =========================
+# HEALTH
 # =========================
 @app.route("/ping")
 def ping():
     return "alive"
+
+if __name__ == "__main__":
+    app.run(debug=True)
