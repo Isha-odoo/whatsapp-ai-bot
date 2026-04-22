@@ -6,22 +6,33 @@ from supabase import create_client
 app = Flask(__name__)
 
 # =========================
-# META CONFIG
+# META CONFIG (USE ENV)
 # =========================
-VERIFY_TOKEN = "abc123"
-WHATSAPP_TOKEN = "YOUR_META_ACCESS_TOKEN"
-PHONE_NUMBER_ID = "YOUR_PHONE_NUMBER_ID"
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "abc123")
+WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
+PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 
 # =========================
 # SUPABASE CONFIG
 # =========================
-SUPABASE_URL = "YOUR_SUPABASE_URL"
-SUPABASE_KEY = "YOUR_SUPABASE_KEY"
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase = None
+
+# SAFE SUPABASE INIT
+if SUPABASE_URL and SUPABASE_KEY and SUPABASE_URL.startswith("https://"):
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        print("✅ Supabase connected")
+    except Exception as e:
+        print("❌ Supabase init error:", e)
+else:
+    print("⚠️ Supabase not configured properly (check env variables)")
+
 
 # =========================
-# SESSION STORAGE
+# SESSION STORAGE (RAM)
 # =========================
 sessions = {}
 
@@ -29,13 +40,25 @@ sessions = {}
 # GET CLIENT FROM DB
 # =========================
 def get_client(phone_number_id):
-    res = supabase.table("clients").select("*").eq("phone_number_id", phone_number_id).execute()
-    return res.data[0] if res.data else None
+    if not supabase:
+        return None
+
+    try:
+        res = supabase.table("clients").select("*").eq("phone_number_id", phone_number_id).execute()
+        return res.data[0] if res.data else None
+    except Exception as e:
+        print("❌ Supabase query error:", e)
+        return None
+
 
 # =========================
 # SEND WHATSAPP MESSAGE
 # =========================
 def send_message(to, message):
+    if not WHATSAPP_TOKEN or not PHONE_NUMBER_ID:
+        print("❌ WhatsApp config missing")
+        return
+
     url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
 
     headers = {
@@ -51,14 +74,14 @@ def send_message(to, message):
     }
 
     res = requests.post(url, headers=headers, json=data)
-    print("Send:", res.text)
+    print("📤 WhatsApp:", res.status_code, res.text)
+
 
 # =========================
 # CREATE ODOO LEAD
 # =========================
 def create_odoo_lead(client, data):
     try:
-        # AUTH
         auth_payload = {
             "jsonrpc": "2.0",
             "method": "call",
@@ -74,10 +97,9 @@ def create_odoo_lead(client, data):
         uid = auth.get("result")
 
         if not uid:
-            print("❌ Odoo Auth Failed")
+            print("❌ Odoo login failed")
             return
 
-        # CREATE LEAD
         lead_payload = {
             "jsonrpc": "2.0",
             "method": "call",
@@ -112,8 +134,9 @@ Website: {data.get('website')}
     except Exception as e:
         print("❌ Odoo Error:", e)
 
+
 # =========================
-# WEBHOOK VERIFY (GET)
+# VERIFY WEBHOOK
 # =========================
 @app.route("/webhook", methods=["GET"])
 def verify():
@@ -124,32 +147,29 @@ def verify():
         return challenge
     return "Invalid token", 403
 
+
 # =========================
-# WEBHOOK RECEIVE (POST)
+# RECEIVE MESSAGE
 # =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json()
 
     try:
-        value = data["entry"][0]["changes"][0]["value"]
+        value = data.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {})
 
         if "messages" not in value:
             return "OK", 200
 
-        # 🔥 MULTI CLIENT IDENTIFIER
         phone_number_id = value["metadata"]["phone_number_id"]
-
-        # 👤 USER
         user = value["messages"][0]["from"]
-        msg = value["messages"][0]["text"]["body"]
 
-        print("CLIENT:", phone_number_id)
-        print("USER:", user, "MSG:", msg)
+        msg_obj = value["messages"][0]
+        msg = msg_obj.get("text", {}).get("body", "")
 
-        # 🔥 GET CLIENT DATA
+        print("📩 USER:", user, "MSG:", msg)
+
         client = get_client(phone_number_id)
-
         if not client:
             print("❌ Client not found")
             return "OK", 200
@@ -192,7 +212,7 @@ def webhook():
 
                 create_odoo_lead(client, state)
                 reply = "✅ Thank you! We’ll contact you."
-                sessions.pop(user)
+                sessions.pop(user, None)
 
         elif state["step"] == 6:
             state["website"] = msg
@@ -200,7 +220,7 @@ def webhook():
 
             create_odoo_lead(client, state)
             reply = "✅ Thank you! We’ll contact you."
-            sessions.pop(user)
+            sessions.pop(user, None)
 
         sessions[user] = state
 
@@ -211,12 +231,14 @@ def webhook():
 
     return "OK", 200
 
+
 # =========================
-# HEALTH
+# HEALTH CHECK
 # =========================
 @app.route("/ping")
 def ping():
     return "alive"
 
+
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=True)
